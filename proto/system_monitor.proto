@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package monitor;
+
+service SystemMonitor {
+  rpc SendAlert (AlertRequest) returns (AnalysisResponse);
+  rpc StreamTelemetry (stream TelemetryData) returns (stream AnalysisResponse);
+}
+
+message AlertRequest {
+  string log_message = 1;
+  string level = 2; // Ex: "CRITICAL", "WARNING"
+}
+
+message TelemetryData {
+  float cpu_percent = 1;
+  float ram_percent = 2;
+  string timestamp = 3;
+}
+
+message AnalysisResponse {
+  string diagnosis = 1;
+}
