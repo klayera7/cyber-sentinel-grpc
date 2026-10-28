@@ -13,7 +13,8 @@ RUN pip3 install --break-system-packages --no-cache-dir grpcio-tools
 
 WORKDIR /build
 COPY proto/system_monitor.proto ./proto/
-RUN python3 -m grpc_tools.protoc \
+RUN mkdir -p /build/gen \
+    && python3 -m grpc_tools.protoc \
         -I proto \
         --python_out=/build/gen \
         --grpc_python_out=/build/gen \
@@ -22,6 +23,12 @@ RUN python3 -m grpc_tools.protoc \
 # ---- Stage 2: runtime — Ollama + modelo + servidor gRPC ----
 FROM ollama/ollama:latest AS runtime
 
+# 1) Modelo primeiro: camada gigante (~4,7 GB), independe de código e deps
+RUN nohup ollama serve > /tmp/ollama-build.log 2>&1 & \
+    until ollama list >/dev/null 2>&1; do sleep 1; done \
+    && ollama pull llama3.1
+
+# 2) Python + dependências (só refaz se requirements.txt mudar)
 COPY requirements.txt /tmp/requirements.txt
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip \
@@ -29,19 +36,13 @@ RUN apt-get update \
     && apt-get purge -y --auto-remove python3-pip \
     && rm -rf /var/lib/apt/lists/* /tmp/requirements.txt
 
-# stubs gerados + código da aplicação
+# 3) Código por último (muda com frequência)
 COPY --from=builder /build/gen /app/proto
 COPY server/main.py /app/server/
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /app
-
-# Pré-baixa o modelo para dentro da imagem (~4,7 GB), evitando download em runtime
-RUN nohup ollama serve > /tmp/ollama-build.log 2>&1 & \
-    until ollama list >/dev/null 2>&1; do sleep 1; done \
-    && ollama pull llama3.1
-
 ENV OLLAMA_MODEL=llama3.1 \
     OLLAMA_HOST=127.0.0.1:11434
 
