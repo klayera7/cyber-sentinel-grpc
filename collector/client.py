@@ -40,7 +40,7 @@ def run():
         except KeyboardInterrupt:
             print("\nColetor desligado pelo utilizador.")
         except grpc.RpcError as e:
-            print(f"\n[Erro] Não foi possível ligar ao Servidor. Ele já está a correr? Detalhe: {e.details()}")
+            print(f"\n[Erro] Não foi possível ligar ao Servidor. Detalhe: {e.details()}")
 
 if __name__ == '__main__':
     run()
