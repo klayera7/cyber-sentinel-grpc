@@ -10,6 +10,8 @@ sys.path.append(caminho_proto)
 import system_monitor_pb2 as pb2
 import system_monitor_pb2_grpc as pb2_grpc
 
+MODELO = os.getenv('OLLAMA_MODEL', 'llama3.1')
+
 class ServidorMonitorizacao(pb2_grpc.SystemMonitorServicer):
     
     def StreamTelemetry(self, request_iterator, context):
@@ -20,7 +22,7 @@ class ServidorMonitorizacao(pb2_grpc.SystemMonitorServicer):
             
             prompt = f"Analise de forma muito breve e direta o estado de um sistema com {dados.cpu_percent}% de CPU e {dados.ram_percent}% de RAM."
             
-            resposta_ia = ollama.generate(model='llama3.1', prompt=prompt)
+            resposta_ia = ollama.generate(model=MODELO, prompt=prompt)
             diagnostico = resposta_ia['response']
             
             print(f"<- IA respondeu: {diagnostico}")
