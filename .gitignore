@@ -6,3 +6,6 @@ __pycache__/
 build/
 dist/
 *.spec
+
+# Memória do agente (local, não versionada)
+AGENTS.md
