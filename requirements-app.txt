@@ -1,0 +1,5 @@
+grpcio
+protobuf
+ollama
+psutil
+matplotlib
