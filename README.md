@@ -6,47 +6,46 @@ Servidor gRPC que recebe telemetria (CPU/RAM) de um coletor e usa um agente de I
 ## Arquitetura
 
 ```
-┌─ Docker Desktop (WSL2) ───────────────────────────┐
-│  container "sentinel"                             │
-│   ├─ ollama serve  (GPU NVIDIA)                   │
-│   ├─ modelo llama3.1                              │
-│   └─ servidor gRPC  :50051                        │
-└───────────────────────────────────────────────────┘
-        ▲ localhost:50051
-┌─ Windows (nativo) ────────────┐
-│  collector/client.py (psutil) │ → lê CPU/RAM reais do Windows
-└───────────────────────────────┘
+┌─ Windows (nativo) ──────────────────────────────────────┐
+│  Ollama (servindo o modelo llama3.1)                    │
+│   └─ API em 127.0.0.1:11434                             │
+│                                                         │
+│  Servidor gRPC  :50051  → consulta o Ollama             │
+│  Coletor        → envia CPU/RAM via streaming           │
+└─────────────────────────────────────────────────────────┘
 ```
 
-O Ollama e o modelo ficam **dentro** da imagem (imagem única autocontida, ~6 GB).
-O coletor roda **fora** do container para conseguir ler as métricas reais da máquina
-Windows (dentro do container ele leria apenas a VM WSL2).
+Tudo roda **nativo no Windows**: o Ollama serve o modelo localmente, o servidor
+gRPC consulta o Ollama para gerar o diagnóstico, e o coletor usa `psutil` para
+ler CPU/RAM reais da máquina e envia via streaming.
 
 ## Pré-requisitos
 
-1. **Docker Desktop** com backend **WSL2** — o Docker Desktop instala e configura o
-   WSL2 sozinho; **não** é preciso instalar WSL manualmente. Confirme que
-   "Use the WSL 2 based engine" está marcado.
-2. **Driver NVIDIA** instalado no Windows.
-3. **GPU ativada no Docker Desktop** (Settings → Resources → WSL Integration / GPU).
+1. **Python 3.10+** instalado (testado com 3.12).
+2. **Ollama** instalado nativamente no Windows: https://ollama.com/download
+3. Modelo `llama3.1` baixado (feito uma única vez):
 
-> O Ollama nativo no Windows **não é necessário** — o container traz o próprio Ollama.
-> Se você tiver um instalado, pode manter ou desinstalar; não há conflito (só a porta
-> `50051` é exposta ao host).
+```bash
+ollama pull llama3.1
+```
+
+> Sem GPU, o Ollama roda em CPU e a inferência fica mais lenta (ainda funciona).
 
 ## Rodar o servidor (Ollama + gRPC)
 
 ```bash
-docker compose up --build
+# 1. Garanta que o Ollama está rodando e com o modelo disponível.
+#    O app do Ollama já deixa o servidor ativo; se necessário, rode:
+ollama serve
+
+# 2. Instale as dependências e suba o servidor gRPC:
+pip install -r requirements.txt
+python server/main.py
 ```
 
-A primeira subida baixa o modelo `llama3.1` (~4,7 GB) durante o build e demora.
-Depois disso, sobe rápido.
+O servidor sobe na porta `50051`.
 
-⚠️ Sem driver NVIDIA/GPU configurado no Docker Desktop, o daemon cai em **CPU** e a
-inferência fica bem mais lenta (ainda funciona).
-
-## Rodar o coletor (nativo no Windows)
+## Rodar o coletor
 
 ```bash
 pip install -r requirements-collector.txt
@@ -55,16 +54,36 @@ python collector/client.py
 
 ## Configuração (env)
 
-| Variável       | Default            | Descrição                           |
-| -------------- | ------------------ | ----------------------------------- |
-| `OLLAMA_MODEL` | `llama3.1`         | Modelo usado pelo agente de IA      |
-| `OLLAMA_HOST`  | `127.0.0.1:11434`  | Endereço do Ollama (interno ao container) |
+| Variável       | Default            | Descrição                       |
+| -------------- | ------------------ | ------------------------------- |
+| `OLLAMA_MODEL` | `llama3.1`         | Modelo usado pelo agente de IA  |
+| `OLLAMA_HOST`  | `127.0.0.1:11434`  | Endereço do Ollama (nativo)     |
+
+## Interface gráfica (desktop)
+
+Um painel único que reúne servidor + coletor + visualização numa só janela
+(gráficos de CPU/RAM em tempo real e feed de diagnósticos da IA).
+
+```bash
+pip install -r requirements-app.txt
+python app/main.py
+```
+
+Para gerar o executável único:
+
+```bash
+pip install pyinstaller
+python build_exe.py      # gera dist/cyber-sentinel.exe
+```
 
 ## Estrutura
 
 - `proto/` — contrato gRPC (`system_monitor.proto`) + stubs gerados
 - `server/` — servidor gRPC que consulta a IA (Ollama)
 - `collector/` — cliente que envia CPU/RAM via streaming
-- `Dockerfile` — imagem multistage (builder regenera stubs; runtime só o necessário)
-- `docker-compose.yml` — orquestra o container com reserva de GPU NVIDIA
-- `entrypoint.sh` — sobe `ollama serve` + o servidor gRPC no mesmo container
+- `app/` — interface gráfica (Tkinter) com servidor + coletor embutidos
+- `consumer/` — reservado (vazio)
+- `build_exe.py` — gera o executável (PyInstaller)
+- `requirements.txt` — dependências do servidor
+- `requirements-collector.txt` — dependências do coletor
+- `requirements-app.txt` — dependências da interface gráfica
