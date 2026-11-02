@@ -15,6 +15,10 @@ PyInstaller.__main__.run([
     '--paths', RAIZ,
     '--hidden-import', 'system_monitor_pb2',
     '--hidden-import', 'system_monitor_pb2_grpc',
+    '--hidden-import', 'consumer.main',
+    '--hidden-import', 'consumer.state_machine',
+    '--hidden-import', 'consumer.state_store',
     '--collect-all', 'grpc',
     '--collect-all', 'matplotlib',
+    '--collect-all', 'pika',
 ])
