@@ -3,3 +3,4 @@ protobuf
 ollama
 psutil
 matplotlib
+pika

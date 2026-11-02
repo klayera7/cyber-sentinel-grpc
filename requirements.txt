@@ -1,3 +1,4 @@
 grpcio
 protobuf
 ollama
+pika
