@@ -1,7 +1,8 @@
 # cyber-sentinel-grpc
 
-Servidor gRPC que recebe telemetria (CPU/RAM) de um coletor e usa um agente de IA
-(Ollama + `llama3.1`) para analisar o estado do sistema e devolver um diagnóstico.
+Servidor gRPC que recebe telemetria (CPU/RAM/GPU) de um coletor, aplica regras
+rápidas para estados comuns e usa Ollama (`llama3.1`) com cache para analisar
+estados elevados e devolver diagnósticos.
 
 ## Arquitetura
 
@@ -10,20 +11,31 @@ Servidor gRPC que recebe telemetria (CPU/RAM) de um coletor e usa um agente de I
 │  Ollama (servindo o modelo llama3.1)                    │
 │   └─ API em 127.0.0.1:11434                             │
 │                                                         │
-│  Servidor gRPC  :50051  → consulta o Ollama             │
-│  Coletor        → envia CPU/RAM via streaming           │
+│  Servidor gRPC  :50051  → regras + cache + Ollama       │
+│  Coletor        → envia CPU/RAM/GPU/temperatura         │
+│  Servidor       → outbox SQLite → RabbitMQ              │
+│  consumer/      → máquina de estados independente       │
+│  Transições     → SendAlert → toast + sino na interface │
+│  Sino           → histórico filtrável da sessão          │
 └─────────────────────────────────────────────────────────┘
 ```
 
 Tudo roda **nativo no Windows**: o Ollama serve o modelo localmente, o servidor
-gRPC consulta o Ollama para gerar o diagnóstico, e o coletor usa `psutil` para
-ler CPU/RAM reais da máquina e envia via streaming.
+gRPC usa regras instantâneas para estados comuns e consulta o Ollama com cache
+para estados elevados. Ao clicar em **Iniciar**, também inicia o consumidor de
+estados como processo filho. O coletor usa `psutil` para
+ler CPU/RAM reais da máquina e envia via streaming. Uso da GPU, VRAM e
+temperatura da GPU vêm de `nvidia-smi` (sem precisar de administrador); se não
+houver GPU NVIDIA, esses campos são simplesmente omitidos.
 
 ## Pré-requisitos
 
 1. **Python 3.10+** instalado (testado com 3.12).
 2. **Ollama** instalado nativamente no Windows: https://ollama.com/download
-3. Modelo `llama3.1` baixado (feito uma única vez):
+3. RabbitMQ instalado como serviço Windows (com Erlang). O botão **Iniciar** do
+   painel tenta ativar o serviço e aguarda o endpoint `127.0.0.1:5672`; execute
+   o painel como administrador para permitir iniciar/parar o serviço.
+4. Modelo `llama3.1` baixado (feito uma única vez):
 
 ```bash
 ollama pull llama3.1
@@ -52,17 +64,41 @@ pip install -r requirements-collector.txt
 python collector/client.py
 ```
 
+## Rodar o consumidor de decisões separadamente
+
+O painel inicia e encerra o consumidor junto com a coleta. Para executá-lo em
+modo independente, com RabbitMQ instalado e ativo:
+
+```bash
+pip install -r requirements-consumer.txt
+python consumer/main.py
+```
+
+O servidor publica uma mensagem por amostra processada. O consumidor persiste
+transições de estado em SQLite e as registra; não executa ações automáticas no
+sistema. Ao detectar uma transição, chama `SendAlert`; o painel mostra um popup
+e mantém a notificação no sino até ser aberta. Não execute o comando separado ao
+mesmo tempo que o painel, pois a fila aceita um consumidor de estados ativo.
+O menu do sino também mostra diagnósticos, decisões e logs recebidos enquanto
+estava fechado; o histórico só existe durante a sessão atual do app.
+
 ## Configuração (env)
 
 | Variável       | Default            | Descrição                       |
 | -------------- | ------------------ | ------------------------------- |
 | `OLLAMA_MODEL` | `llama3.1`         | Modelo usado pelo agente de IA  |
 | `OLLAMA_HOST`  | `127.0.0.1:11434`  | Endereço do Ollama (nativo)     |
+| `RABBITMQ_URL` | `amqp://guest:guest@127.0.0.1:5672/%2F` | URL do broker |
+| `RABBITMQ_SERVICE_NAME` | `RabbitMQ` | Nome do serviço RabbitMQ no Windows |
+| `GRPC_TARGET` | `127.0.0.1:50051` | Destino gRPC do consumidor para enviar alertas |
+| `SENTINEL_STATE_DB` | `%LOCALAPPDATA%/CyberSentinel/state_machine.sqlite3` | Banco da máquina de estados |
+| `SENTINEL_HOST_ID` | hostname local | Identificador estável opcional da máquina |
+| `SENTINEL_OUTBOX_DB` | `%LOCALAPPDATA%/CyberSentinel/rabbit_outbox.sqlite3` | Banco de eventos pendentes |
 
 ## Interface gráfica (desktop)
 
 Um painel único que reúne servidor + coletor + visualização numa só janela
-(gráficos de CPU/RAM em tempo real e feed de diagnósticos da IA).
+(gráficos de CPU/RAM/GPU/temperatura da GPU em tempo real e feed de diagnósticos da IA).
 
 ```bash
 pip install -r requirements-app.txt
@@ -79,10 +115,16 @@ python build_exe.py      # gera dist/cyber-sentinel.exe
 ## Estrutura
 
 - `proto/` — contrato gRPC (`system_monitor.proto`) + stubs gerados
-- `server/` — servidor gRPC que consulta a IA (Ollama)
+- `server/` — servidor gRPC, regras e cache de diagnóstico, integração Ollama
 - `collector/` — cliente que envia CPU/RAM via streaming
 - `app/` — interface gráfica (Tkinter) com servidor + coletor embutidos
-- `consumer/` — reservado (vazio)
+  - `sensores.py` — leitura de GPU/VRAM/temperatura da GPU via `nvidia-smi`
+  - `rabbitmq_service.py` — inicialização/verificação do serviço RabbitMQ
+  - `historico.py` — histórico filtrável em memória da sessão
+- `messaging/` — contrato/configuração RabbitMQ e schema dos eventos
+- `consumer/` — consumidor RabbitMQ, máquina de estados e armazenamento SQLite
+- `SendAlert` — entrega gRPC de notificações à interface desktop
+- `requirements-consumer.txt` — dependências do consumidor
 - `build_exe.py` — gera o executável (PyInstaller)
 - `requirements.txt` — dependências do servidor
 - `requirements-collector.txt` — dependências do coletor
