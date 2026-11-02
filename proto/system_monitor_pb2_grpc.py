@@ -37,7 +37,7 @@ class SystemMonitorStub:
         self.SendAlert = channel.unary_unary(
                 '/monitor.SystemMonitor/SendAlert',
                 request_serializer=system__monitor__pb2.AlertRequest.SerializeToString,
-                response_deserializer=system__monitor__pb2.AnalysisResponse.FromString,
+                response_deserializer=system__monitor__pb2.AlertAck.FromString,
                 _registered_method=True)
         self.StreamTelemetry = channel.stream_stream(
                 '/monitor.SystemMonitor/StreamTelemetry',
@@ -67,7 +67,7 @@ def add_SystemMonitorServicer_to_server(servicer, server):
             'SendAlert': grpc.unary_unary_rpc_method_handler(
                     servicer.SendAlert,
                     request_deserializer=system__monitor__pb2.AlertRequest.FromString,
-                    response_serializer=system__monitor__pb2.AnalysisResponse.SerializeToString,
+                    response_serializer=system__monitor__pb2.AlertAck.SerializeToString,
             ),
             'StreamTelemetry': grpc.stream_stream_rpc_method_handler(
                     servicer.StreamTelemetry,
@@ -101,7 +101,7 @@ class SystemMonitor:
             target,
             '/monitor.SystemMonitor/SendAlert',
             system__monitor__pb2.AlertRequest.SerializeToString,
-            system__monitor__pb2.AnalysisResponse.FromString,
+            system__monitor__pb2.AlertAck.FromString,
             options,
             channel_credentials,
             insecure,

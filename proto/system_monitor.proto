@@ -3,19 +3,31 @@ syntax = "proto3";
 package monitor;
 
 service SystemMonitor {
-  rpc SendAlert (AlertRequest) returns (AnalysisResponse);
+  rpc SendAlert (AlertRequest) returns (AlertAck);
   rpc StreamTelemetry (stream TelemetryData) returns (stream AnalysisResponse);
 }
 
 message AlertRequest {
   string log_message = 1;
-  string level = 2; // Ex: "CRITICAL", "WARNING"
+  string level = 2;
+  string alert_id = 3;
+  string host_id = 4;
+  string source = 5;
+}
+
+message AlertAck {
+  bool accepted = 1;
+  string alert_id = 2;
+  string error = 3;
 }
 
 message TelemetryData {
   float cpu_percent = 1;
   float ram_percent = 2;
   string timestamp = 3;
+  optional float temp_celsius = 4;
+  optional float gpu_percent = 5;
+  optional float gpu_mem_percent = 6;
 }
 
 message AnalysisResponse {

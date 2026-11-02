@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14system_monitor.proto\x12\x07monitor\"2\n\x0c\x41lertRequest\x12\x13\n\x0blog_message\x18\x01 \x01(\t\x12\r\n\x05level\x18\x02 \x01(\t\"L\n\rTelemetryData\x12\x13\n\x0b\x63pu_percent\x18\x01 \x01(\x02\x12\x13\n\x0bram_percent\x18\x02 \x01(\x02\x12\x11\n\ttimestamp\x18\x03 \x01(\t\"%\n\x10\x41nalysisResponse\x12\x11\n\tdiagnosis\x18\x01 \x01(\t2\x98\x01\n\rSystemMonitor\x12=\n\tSendAlert\x12\x15.monitor.AlertRequest\x1a\x19.monitor.AnalysisResponse\x12H\n\x0fStreamTelemetry\x12\x16.monitor.TelemetryData\x1a\x19.monitor.AnalysisResponse(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14system_monitor.proto\x12\x07monitor\"e\n\x0c\x41lertRequest\x12\x13\n\x0blog_message\x18\x01 \x01(\t\x12\r\n\x05level\x18\x02 \x01(\t\x12\x10\n\x08\x61lert_id\x18\x03 \x01(\t\x12\x0f\n\x07host_id\x18\x04 \x01(\t\x12\x0e\n\x06source\x18\x05 \x01(\t\"=\n\x08\x41lertAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x10\n\x08\x61lert_id\x18\x02 \x01(\t\x12\r\n\x05\x65rror\x18\x03 \x01(\t\"\xd4\x01\n\rTelemetryData\x12\x13\n\x0b\x63pu_percent\x18\x01 \x01(\x02\x12\x13\n\x0bram_percent\x18\x02 \x01(\x02\x12\x11\n\ttimestamp\x18\x03 \x01(\t\x12\x19\n\x0ctemp_celsius\x18\x04 \x01(\x02H\x00\x88\x01\x01\x12\x18\n\x0bgpu_percent\x18\x05 \x01(\x02H\x01\x88\x01\x01\x12\x1c\n\x0fgpu_mem_percent\x18\x06 \x01(\x02H\x02\x88\x01\x01\x42\x0f\n\r_temp_celsiusB\x0e\n\x0c_gpu_percentB\x12\n\x10_gpu_mem_percent\"%\n\x10\x41nalysisResponse\x12\x11\n\tdiagnosis\x18\x01 \x01(\t2\x90\x01\n\rSystemMonitor\x12\x35\n\tSendAlert\x12\x15.monitor.AlertRequest\x1a\x11.monitor.AlertAck\x12H\n\x0fStreamTelemetry\x12\x16.monitor.TelemetryData\x1a\x19.monitor.AnalysisResponse(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,11 +32,13 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'system_monitor_pb2', _globa
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_ALERTREQUEST']._serialized_start=33
-  _globals['_ALERTREQUEST']._serialized_end=83
-  _globals['_TELEMETRYDATA']._serialized_start=85
-  _globals['_TELEMETRYDATA']._serialized_end=161
-  _globals['_ANALYSISRESPONSE']._serialized_start=163
-  _globals['_ANALYSISRESPONSE']._serialized_end=200
-  _globals['_SYSTEMMONITOR']._serialized_start=203
-  _globals['_SYSTEMMONITOR']._serialized_end=355
+  _globals['_ALERTREQUEST']._serialized_end=134
+  _globals['_ALERTACK']._serialized_start=136
+  _globals['_ALERTACK']._serialized_end=197
+  _globals['_TELEMETRYDATA']._serialized_start=200
+  _globals['_TELEMETRYDATA']._serialized_end=412
+  _globals['_ANALYSISRESPONSE']._serialized_start=414
+  _globals['_ANALYSISRESPONSE']._serialized_end=451
+  _globals['_SYSTEMMONITOR']._serialized_start=454
+  _globals['_SYSTEMMONITOR']._serialized_end=598
 # @@protoc_insertion_point(module_scope)

@@ -2,6 +2,7 @@ import queue
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 
 import grpc
@@ -9,6 +10,18 @@ import psutil
 
 import system_monitor_pb2 as pb2
 import system_monitor_pb2_grpc as pb2_grpc
+
+from app.sensores import Sensores, temperatura_sistema
+
+
+@dataclass
+class Amostra:
+    ts: str
+    cpu: float
+    ram: float
+    gpu: float = None
+    gpu_mem: float = None
+    temp: float = None
 
 
 class Coletor:
@@ -19,6 +32,7 @@ class Coletor:
         self.historico = deque(maxlen=600)
         self.fila_diag = queue.Queue()
         self._fila_envio = queue.Queue(maxsize=1)
+        self._sensores = Sensores()
 
         self._ativo = False
         self._channel = None
@@ -32,23 +46,46 @@ class Coletor:
             ram = psutil.virtual_memory().percent
             agora = datetime.now().strftime('%H:%M:%S')
 
-            self.historico.append((agora, cpu, ram))
+            leitura = self._sensores.ler_gpu()
+            amostra = Amostra(
+                ts=agora,
+                cpu=cpu,
+                ram=ram,
+                gpu=leitura.uso,
+                gpu_mem=leitura.memoria,
+                temp=temperatura_sistema(leitura.temperatura),
+            )
+
+            self.historico.append(amostra)
 
             try:
                 self._fila_envio.get_nowait()
             except queue.Empty:
                 pass
-            self._fila_envio.put((agora, cpu, ram))
+            self._fila_envio.put(amostra)
 
             time.sleep(max(0.0, self.intervalo - 1.0))
 
     def _gerar_telemetria(self):
         while self._ativo:
             try:
-                ts, cpu, ram = self._fila_envio.get(timeout=1.0)
+                amostra = self._fila_envio.get(timeout=1.0)
             except queue.Empty:
                 continue
-            yield pb2.TelemetryData(cpu_percent=cpu, ram_percent=ram, timestamp=ts)
+
+            dados = pb2.TelemetryData(
+                cpu_percent=amostra.cpu,
+                ram_percent=amostra.ram,
+                timestamp=amostra.ts,
+            )
+            if amostra.temp is not None:
+                dados.temp_celsius = amostra.temp
+            if amostra.gpu is not None:
+                dados.gpu_percent = amostra.gpu
+            if amostra.gpu_mem is not None:
+                dados.gpu_mem_percent = amostra.gpu_mem
+
+            yield dados
 
     def _loop_grpc(self, porta):
         while self._ativo:
@@ -95,6 +132,9 @@ class Coletor:
             except Exception:
                 pass
             self._channel = None
+
+    def ultima(self):
+        return self.historico[-1] if self.historico else None
 
     def consumir_diagnosticos(self):
         itens = []
