@@ -9,3 +9,5 @@ dist/
 
 # Memória do agente (local, não versionada)
 AGENTS.md
+/logs/debug.txt
+/logs/sessoes/
