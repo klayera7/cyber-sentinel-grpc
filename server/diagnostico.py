@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -27,17 +28,30 @@ def chave_estado(dados):
     )
 
 
-def estado_interessante(dados):
+def limites_configurados():
+    try:
+        cpu = float(os.getenv('SENTINEL_CPU_LIMIT', '85'))
+        ram = float(os.getenv('SENTINEL_RAM_LIMIT', '85'))
+    except (TypeError, ValueError):
+        return 85.0, 85.0
+    return cpu, ram
+
+
+def estado_interessante(dados, cpu_limit=None, ram_limit=None):
+    if cpu_limit is None or ram_limit is None:
+        cpu_limit, ram_limit = limites_configurados()
     return (
-        dados.cpu_percent >= 70
-        or dados.ram_percent >= 80
+        dados.cpu_percent >= max(0.0, cpu_limit - 15.0)
+        or dados.ram_percent >= max(0.0, ram_limit - 5.0)
         or (_opcional(dados, 'gpu_percent') or 0) >= 70
         or (_opcional(dados, 'gpu_mem_percent') or 0) >= 80
         or (_opcional(dados, 'temp_celsius') or 0) >= 75
     )
 
 
-def diagnostico_rapido(dados):
+def diagnostico_rapido(dados, cpu_limit=None, ram_limit=None):
+    if cpu_limit is None or ram_limit is None:
+        cpu_limit, ram_limit = limites_configurados()
     alertas = []
     temperatura = _opcional(dados, 'temp_celsius')
     gpu = _opcional(dados, 'gpu_percent')
@@ -53,14 +67,14 @@ def diagnostico_rapido(dados):
                 f'Temperatura da GPU alta ({temperatura:.0f} °C); monitore a refrigeração.'
             )
 
-    if dados.cpu_percent >= 90:
+    if dados.cpu_percent >= cpu_limit:
         alertas.append(f'CPU em nível crítico ({dados.cpu_percent:.0f}%).')
-    elif dados.cpu_percent >= 70:
+    elif dados.cpu_percent >= max(0.0, cpu_limit - 15.0):
         alertas.append(f'CPU com carga elevada ({dados.cpu_percent:.0f}%).')
 
-    if dados.ram_percent >= 90:
+    if dados.ram_percent >= ram_limit:
         alertas.append(f'RAM quase esgotada ({dados.ram_percent:.0f}%).')
-    elif dados.ram_percent >= 80:
+    elif dados.ram_percent >= max(0.0, ram_limit - 5.0):
         alertas.append(f'Uso de RAM elevado ({dados.ram_percent:.0f}%).')
 
     if gpu is not None:
