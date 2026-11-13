@@ -1,4 +1,5 @@
 import os
+import re
 
 
 RABBITMQ_URL = os.getenv(
@@ -33,6 +34,22 @@ def caminho_dados(variavel_ambiente, nome_arquivo):
 
     os.makedirs(pasta, exist_ok=True)
     return caminho
+
+
+def caminho_dados_sessao(variavel_ambiente, nome_arquivo, session_id):
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', str(session_id or '')):
+        raise ValueError('ID de sessão inválido.')
+    configurado = os.getenv(variavel_ambiente)
+    if configurado:
+        base = os.path.abspath(os.path.expanduser(configurado))
+    else:
+        raiz = os.getenv('LOCALAPPDATA') or os.path.join(
+            os.path.expanduser('~'), '.cyber-sentinel'
+        )
+        base = os.path.join(raiz, 'CyberSentinel', nome_arquivo)
+    pasta = os.path.join(os.path.dirname(base), 'sessions', session_id)
+    os.makedirs(pasta, exist_ok=True)
+    return os.path.join(pasta, os.path.basename(base))
 
 
 def declarar_topologia(channel):
