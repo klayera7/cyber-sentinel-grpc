@@ -3,20 +3,58 @@ import queue
 import sys
 import subprocess
 import threading
+import time
+import uuid
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk
+from datetime import datetime
+from tkinter import messagebox, ttk
 
 _RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TEMPO_DRENAGEM_SESSAO = 5.0
+TEMPO_REAVALIACAO_PROCESSO = 8.0
 for _p in (_RAIZ, os.path.join(_RAIZ, 'proto')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 from server.main import ServidorMonitorizacao, criar_servidor, parar_servidor
-from app import charts, markdown, ollama_check, theme
+from app import charts, config_limites, markdown, ollama_check, theme
 from app.coletor import Coletor
 from app.historico import HistoricoSessao
+from app.processos import preparar_grupo_processo, terminar_grupo_processo
 from app.rabbitmq_service import garantir_rabbitmq, parar_rabbitmq
+from consumer.state_store import StateStore
+from messaging import debug_log
+from messaging import session_report
+from messaging.config import caminho_dados_sessao
+
+
+def _escolher_processo(amostra, limites, tentados):
+    cpu_acima = amostra.cpu >= limites['cpu_global']
+    ram_acima = amostra.ram >= limites['ram_global']
+    if not cpu_acima and not ram_acima:
+        return None
+
+    processos = [
+        processo for processo in amostra.processos
+        if (processo['pid'], processo['create_time']) not in tentados
+        and ('exe', processo.get('exe_path')) not in tentados
+    ]
+    if not processos:
+        return None
+
+    def pressao(processo):
+        cpu = (
+            processo['cpu_percent'] / limites['cpu_global']
+            if cpu_acima else 0
+        )
+        ram = (
+            processo['ram_percent'] / limites['ram_global']
+            if ram_acima else 0
+        )
+        return max(cpu, ram)
+
+    return max(processos, key=pressao)
 
 
 def _round_rect(canvas, x1, y1, x2, y2, r, **kw):
@@ -245,8 +283,8 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title('Cyber Sentinel')
-        self.root.geometry('1160x760')
-        self.root.minsize(980, 640)
+        self.root.geometry('1160x820')
+        self.root.minsize(980, 700)
         self.root.configure(bg=theme.BG)
 
         self.fila_log = queue.Queue()
@@ -258,15 +296,20 @@ class App:
         self._iniciando = False
         self._app_fechando = False
         self._thread_preparacao = None
+        self.session_id = None
+        self._env_sessao_original = None
         self._rabbitmq_lock = threading.Lock()
         self._parar_rabbitmq_ao_encerrar = False
         self.processo_consumer = None
+        self.state_store = None
         self.fila_alertas = queue.Queue()
         self.notificacoes = []
         self._alertas_ids = set()
         self._popup_alerta = None
+        self._popup_alerta_id = None
         self._janela_notificacoes = None
         self._texto_notificacoes = None
+        self._historico_acoes = None
         self.historico_sessao = HistoricoSessao()
         self._historico_offset = 0
         self._historico_filtro = None
@@ -274,6 +317,8 @@ class App:
         self._historico_status = None
         self._historico_btn_novos = None
         self._historico_btn_antigos = None
+        self.limites = config_limites.carregar()
+        self._limites_sessao = None
 
         self._aplicar_tema()
         self._construir_ui()
@@ -416,6 +461,24 @@ class App:
         campo_porta.grid(row=0, column=2, sticky='ew')
         self.ent_porta = campo_porta.entry
 
+        cfg_limites = tk.Frame(rodape, bg=theme.BG)
+        cfg_limites.pack(fill='x', pady=(10, 0))
+        for coluna in range(2):
+            cfg_limites.grid_columnconfigure(coluna, weight=1)
+        self.ent_limites = {}
+        for coluna, (chave, rotulo) in enumerate((
+            ('cpu_global', 'LIMITE CPU SISTEMA (%)'),
+            ('ram_global', 'LIMITE RAM SISTEMA (%)'),
+        )):
+            campo = CampoConfiguracao(
+                cfg_limites, rotulo, f'{self.limites[chave]:g}', largura=150,
+            )
+            campo.grid(
+                row=0, column=coluna, sticky='ew',
+                padx=(0, 14) if coluna == 0 else 0,
+            )
+            self.ent_limites[chave] = campo.entry
+
         botoes = tk.Frame(rodape, bg=theme.BG)
         botoes.pack(fill='x', pady=(14, 0))
 
@@ -441,9 +504,18 @@ class App:
             porta = self._porta()
             modelo = self._modelo()
             host = self._host()
+            limites = self._ler_limites_interface()
+            if limites is None:
+                return
 
             os.environ['OLLAMA_MODEL'] = modelo
             os.environ['OLLAMA_HOST'] = host
+            os.environ['SENTINEL_CPU_LIMIT'] = str(limites['cpu_global'])
+            os.environ['SENTINEL_RAM_LIMIT'] = str(limites['ram_global'])
+            self.limites = limites
+            self._limites_sessao = dict(limites)
+            config_limites.salvar(limites)
+            self._iniciar_nova_sessao()
 
             self._iniciando = True
             with self._rabbitmq_lock:
@@ -462,6 +534,68 @@ class App:
                 self._parar_rabbitmq_ao_encerrar = False
             self.btn_iniciar.set_enabled(True)
             self._log(f'Falha ao preparar inicialização: {e}')
+            self._finalizar_sessao('falha_ao_preparar')
+
+    def _iniciar_nova_sessao(self):
+        session_id = str(uuid.uuid4())
+        variaveis = (
+            'SENTINEL_SESSION_ID',
+            'SENTINEL_OUTBOX_DB',
+            'SENTINEL_STATE_DB',
+        )
+        valores_originais = {nome: os.environ.get(nome) for nome in variaveis}
+        caminho_outbox = caminho_dados_sessao(
+            'SENTINEL_OUTBOX_DB', 'rabbit_outbox.sqlite3', session_id,
+        )
+        caminho_estado = caminho_dados_sessao(
+            'SENTINEL_STATE_DB', 'state_machine.sqlite3', session_id,
+        )
+        os.environ['SENTINEL_SESSION_ID'] = session_id
+        os.environ['SENTINEL_OUTBOX_DB'] = caminho_outbox
+        os.environ['SENTINEL_STATE_DB'] = caminho_estado
+        self.session_id = session_id
+        self._env_sessao_original = valores_originais
+        try:
+            session_report.iniciar_sessao(session_id)
+            debug_log.registrar(
+                'app', 'sessao_iniciada', session_id=session_id,
+                outbox_db=caminho_outbox, state_db=caminho_estado,
+                limits=getattr(self, '_limites_sessao', None),
+            )
+        except Exception:
+            self._restaurar_ambiente_sessao()
+            self.session_id = None
+            raise
+
+    def _restaurar_ambiente_sessao(self):
+        valores = getattr(self, '_env_sessao_original', None)
+        if valores is None:
+            return
+        for nome, valor in valores.items():
+            if valor is None:
+                os.environ.pop(nome, None)
+            else:
+                os.environ[nome] = valor
+        self._env_sessao_original = None
+
+    def _finalizar_sessao(self, motivo):
+        session_id = getattr(self, 'session_id', None)
+        if not session_id:
+            return
+        debug_log.registrar(
+            'app', 'sessao_encerrada', session_id=session_id, reason=motivo,
+        )
+        try:
+            session_report.finalizar_sessao(session_id, motivo)
+        except Exception as erro:
+            debug_log.registrar(
+                'app', 'relatorio_sessao_falhou', nivel='ERROR',
+                session_id=session_id, erro=erro,
+            )
+        finally:
+            self.session_id = None
+            self.state_store = None
+            self._restaurar_ambiente_sessao()
 
     def _preparar_rabbitmq(self, porta):
         try:
@@ -495,8 +629,11 @@ class App:
                 ao_alerta=self._receber_alerta,
             )
             self.servidor = criar_servidor(porta, servicer=servicer)
+            servicer.ativar_amostras_diretas()
+            self.coletor.ao_amostra = servicer.publicar_amostra_estado
             self._log(f'Servidor gRPC iniciado na porta {porta}.')
 
+            self.state_store = StateStore()
             self._iniciar_consumidor(porta)
             self.coletor.iniciar(porta=porta)
             self._log('Coleta de telemetria iniciada.')
@@ -508,34 +645,104 @@ class App:
             self._verificar_ollama_async()
         except Exception as e:
             self._log(f'Falha ao iniciar: {e}')
-            self._parar_consumidor()
+            self.coletor.ao_amostra = None
             if self.servidor is not None:
                 try:
                     parar_servidor(self.servidor, grace=0)
                 except Exception:
                     pass
                 self.servidor = None
+            self._parar_consumidor()
             self._encerrar_rabbitmq()
             self.btn_iniciar.set_enabled(True)
+            self._finalizar_sessao('falha_na_inicializacao')
 
-    def _parar(self):
+    def _parar(self, motivo='parada_pelo_usuario'):
         self.coletor.parar()
+        self.coletor.ao_amostra = None
         self._log('Coleta de telemetria parada.')
-        self._parar_consumidor()
 
+        ultimo_evento = None
+        outbox_pendente = 0
+        publicador = None
         if self.servidor is not None:
+            servicer = getattr(self.servidor, '_sentinel_servicer', None)
+            ultimo_evento = getattr(servicer, 'ultimo_evento_estado', None)
             try:
-                parar_servidor(self.servidor, grace=1)
+                parar_servidor(self.servidor, grace=3)
             except Exception as e:
                 self._log(f'Aviso ao parar o servidor: {e}')
+            publicador = getattr(servicer, 'publicador', None)
+            if publicador is not None:
+                try:
+                    outbox_pendente = publicador.outbox.quantidade_pendente()
+                except Exception:
+                    outbox_pendente = 0
             self.servidor = None
             self._log('Servidor gRPC parado.')
 
+        consumidor_ativo = (
+            self.processo_consumer is not None
+            and self.processo_consumer.poll() is None
+        )
+        state_store = getattr(self, 'state_store', None)
+        if consumidor_ativo and ultimo_evento and state_store is not None:
+            if outbox_pendente:
+                debug_log.registrar(
+                    'app', 'outbox_sessao_com_pendencias', nivel='WARNING',
+                    pending_count=outbox_pendente, last_event_id=ultimo_evento,
+                )
+                self._log(
+                    f'Aviso: {outbox_pendente} evento(s) da sessão ficaram no '
+                    'outbox e não serão reenviados.'
+                )
+            else:
+                limite = time.monotonic() + TEMPO_DRENAGEM_SESSAO
+                processado = False
+                pendentes = []
+                while time.monotonic() < limite:
+                    try:
+                        processado = state_store.evento_processado(
+                            ultimo_evento
+                        )
+                        pendentes = state_store.alertas_pendentes()
+                    except Exception:
+                        break
+                    if processado and not pendentes:
+                        break
+                    time.sleep(0.1)
+                if not processado or pendentes:
+                    debug_log.registrar(
+                        'app', 'drenagem_sessao_incompleta', nivel='WARNING',
+                        last_event_id=ultimo_evento, processed=processado,
+                        pending_alerts=len(pendentes),
+                    )
+                    self._log(
+                        'Aviso: o consumidor não confirmou todos os eventos '
+                        'da sessão antes do encerramento.'
+                    )
+        if publicador is not None:
+            try:
+                pendentes_finais = publicador.outbox.quantidade_pendente()
+            except Exception:
+                pendentes_finais = 0
+            if pendentes_finais and pendentes_finais != outbox_pendente:
+                debug_log.registrar(
+                    'app', 'outbox_sessao_com_pendencias', nivel='WARNING',
+                    pending_count=pendentes_finais,
+                    last_event_id=ultimo_evento, final_check=True,
+                )
+                self._log(
+                    f'Aviso: {pendentes_finais} evento(s) da sessão ficaram '
+                    'no outbox no encerramento.'
+                )
+        self._parar_consumidor()
         self._encerrar_rabbitmq()
         self._iniciando = False
         self._set_pill(self.pill_servidor, 'Servidor', 'parado', theme.ERR)
         self.btn_iniciar.set_enabled(True)
         self.btn_parar.set_enabled(False)
+        self._finalizar_sessao(motivo)
 
     def _iniciar_consumidor(self, porta):
         if self.processo_consumer is not None:
@@ -674,6 +881,27 @@ class App:
 
         threading.Thread(target=trabalho, daemon=True).start()
 
+    def _ler_limites_interface(self):
+        limites = {}
+        rotulos = {
+            'cpu_global': 'CPU do sistema',
+            'ram_global': 'RAM do sistema',
+        }
+        for chave, rotulo in rotulos.items():
+            valor = config_limites.validar_texto(
+                self.ent_limites[chave].get()
+            )
+            if valor is None:
+                messagebox.showwarning(
+                    'Limite inválido',
+                    f'{rotulo}: informe um número maior que 0 e até 100.',
+                    parent=self.root,
+                )
+                self._log(f'Limite inválido para {rotulo.lower()}.')
+                return None
+            limites[chave] = valor
+        return limites
+
     def _modelo(self):
         return self.ent_modelo.get().strip() or 'llama3.1'
 
@@ -688,11 +916,23 @@ class App:
 
     def _log(self, msg):
         self.fila_log.put(msg)
+        maiuscula = str(msg).upper()
+        nivel = (
+            'ERROR' if any(palavra in maiuscula for palavra in ('FALHA', 'ERRO'))
+            else 'WARNING' if any(palavra in maiuscula for palavra in ('AVISO', 'INDISPONÍVEL'))
+            else 'INFO'
+        )
+        debug_log.registrar('app', 'log', nivel=nivel, message=str(msg))
 
     def _registrar_historico(
         self, categoria, mensagem, ocorrido_em=None, nivel='INFO',
         origem='', host_id='',
     ):
+        debug_log.registrar(
+            'historico', 'registro', category=categoria, level=nivel,
+            source=origem, host_id=host_id, timestamp=ocorrido_em,
+            message=mensagem,
+        )
         self.historico_sessao.registrar(
             categoria,
             mensagem,
@@ -770,6 +1010,11 @@ class App:
         self.root.after(150, self._atualizar_diagnosticos)
 
     def _receber_alerta(self, alerta):
+        debug_log.registrar(
+            'app', 'alerta_recebido', alert_id=alerta.get('alert_id'),
+            host_id=alerta.get('host_id'), level=alerta.get('level'),
+            source=alerta.get('source'), message=alerta.get('message'),
+        )
         self.fila_alertas.put(alerta)
 
     def _atualizar_alertas(self):
@@ -779,10 +1024,30 @@ class App:
             except queue.Empty:
                 break
 
+            if (
+                alerta.get('alert_type') == 'state_transition'
+                and alerta.get('current_state') != 'CRÍTICO'
+            ):
+                for pendente in self.notificacoes:
+                    if (
+                        pendente.get('process')
+                        and pendente.get('action_status') == 'PENDENTE'
+                    ):
+                        self._finalizar_sugestao(
+                            pendente,
+                            'NAO_MAIS_ALTO',
+                            'O estado global saiu de CRÍTICO; encerramento cancelado.',
+                        )
+
             alert_id = alerta['alert_id']
             if alert_id in self._alertas_ids:
+                debug_log.registrar(
+                    'app', 'alerta_duplicado_na_interface', alert_id=alert_id,
+                )
                 continue
             item = {**alerta, 'lida': False}
+            if item.get('process'):
+                item['action_status'] = 'PENDENTE'
             self._alertas_ids.add(alert_id)
             self.notificacoes.insert(0, item)
             self.notificacoes = self.notificacoes[:100]
@@ -791,25 +1056,26 @@ class App:
                 sum(not n['lida'] for n in self.notificacoes)
             )
             self._registrar_historico(
-                'Notificações',
-                alerta['message'],
+                'Decisões' if item.get('process') else 'Notificações',
+                (
+                    f"Possível processo associado: {item['process']['name']} "
+                    f"(PID {item['process']['pid']}). {alerta['message']}"
+                    if item.get('process') else alerta['message']
+                ),
                 ocorrido_em=alerta['received_at'],
                 nivel=alerta['level'],
                 origem=alerta['source'],
                 host_id=alerta['host_id'],
             )
             self._renderizar_notificacoes()
+            self._renderizar_acoes_pendentes()
             self._mostrar_toast(item)
 
         self.root.after(150, self._atualizar_alertas)
 
     def _mostrar_toast(self, alerta):
         if self._popup_alerta is not None:
-            try:
-                if self._popup_alerta.winfo_exists():
-                    self._popup_alerta.destroy()
-            except tk.TclError:
-                pass
+            self._fechar_toast(self._popup_alerta, 'substituido')
 
         cores = {
             'CRITICAL': theme.ERR,
@@ -819,6 +1085,7 @@ class App:
         cor = cores.get(alerta['level'], theme.ACCENT)
         popup = tk.Toplevel(self.root)
         self._popup_alerta = popup
+        self._popup_alerta_id = alerta['alert_id']
         popup.overrideredirect(True)
         popup.transient(self.root)
         popup.configure(bg=theme.SURFACE)
@@ -844,6 +1111,39 @@ class App:
         )
         mensagem.pack(fill='x', padx=14, pady=(0, 10))
 
+        processo = alerta.get('process')
+        if processo:
+            tk.Label(
+                cartao,
+                text=(
+                    f"Possível processo relacionado: {processo['name']} "
+                    f"(PID {processo['pid']}) · CPU {processo['cpu_percent']:.1f}% · "
+                    f"RAM {processo['ram_percent']:.1f}%"
+                ),
+                font=('Segoe UI', 8), fg=theme.FG_MUTED, bg=theme.SURFACE,
+                anchor='w', wraplength=330, justify='left',
+            ).pack(fill='x', padx=14, pady=(0, 8))
+            botoes = tk.Frame(cartao, bg=theme.SURFACE)
+            botoes.pack(fill='x', padx=14, pady=(0, 10))
+            tk.Button(
+                botoes, text='Encerrar processo',
+                command=lambda: self._resolver_sugestao(
+                    alerta['alert_id'], 'ENCERRAR',
+                ),
+                bg=theme.ERR, fg='#ffffff', activebackground=theme.ERR,
+                activeforeground='#ffffff', relief='flat', borderwidth=0,
+                padx=10, pady=5, cursor='hand2',
+            ).pack(side='left', padx=(0, 8))
+            tk.Button(
+                botoes, text='Ignorar',
+                command=lambda: self._resolver_sugestao(
+                    alerta['alert_id'], 'IGNORAR',
+                ),
+                bg=theme.SURFACE_2, fg=theme.FG, activebackground=theme.SURFACE_2,
+                activeforeground=theme.FG, relief='flat', borderwidth=0,
+                padx=10, pady=5, cursor='hand2',
+            ).pack(side='left')
+
         def abrir(_evento=None):
             self._abrir_notificacoes()
 
@@ -855,9 +1155,26 @@ class App:
         y = self.root.winfo_rooty() + 72
         popup.geometry(f'+{x}+{y}')
         popup.lift()
-        popup.after(6500, lambda: self._fechar_toast(popup))
+        debug_log.registrar(
+            'app', 'popup_exibido', alert_id=alerta['alert_id'],
+            host_id=alerta['host_id'], level=alerta['level'],
+            process=(
+                {
+                    chave: valor for chave, valor in processo.items()
+                    if chave != 'exe_path'
+                }
+                if processo else None
+            ),
+            message=alerta['message'],
+            timeout_ms=10000 if processo else 6500,
+        )
+        popup.after(
+            10000 if processo else 6500,
+            lambda: self._fechar_toast(popup, 'timeout'),
+        )
 
-    def _fechar_toast(self, popup):
+    def _fechar_toast(self, popup, motivo='fechado'):
+        alert_id = self._popup_alerta_id if self._popup_alerta is popup else None
         try:
             if popup.winfo_exists():
                 popup.destroy()
@@ -865,6 +1182,282 @@ class App:
             pass
         if self._popup_alerta is popup:
             self._popup_alerta = None
+            self._popup_alerta_id = None
+        if alert_id:
+            debug_log.registrar(
+                'app', 'popup_fechado', alert_id=alert_id, reason=motivo,
+            )
+
+    def _resolver_sugestao(self, alert_id, acao):
+        alerta = next(
+            (
+                item for item in self.notificacoes
+                if item['alert_id'] == alert_id and item.get('process')
+            ),
+            None,
+        )
+        if alerta is None or alerta.get('action_status') != 'PENDENTE':
+            return
+        if acao == 'IGNORAR':
+            self._finalizar_sugestao(
+                alerta, 'IGNORADO', 'Sugestão ignorada pelo usuário.',
+            )
+            return
+
+        if not self._sugestao_ainda_valida(alerta):
+            self._finalizar_sugestao(
+                alerta, 'NAO_MAIS_ALTO',
+                'O sistema normalizou ou saiu de CRÍTICO; encerramento cancelado.',
+            )
+            return
+
+        alerta['action_status'] = 'PREPARANDO'
+        self._renderizar_notificacoes()
+        self._renderizar_acoes_pendentes()
+        threading.Thread(
+            target=self._preparar_grupo_async,
+            args=(alerta,),
+            daemon=True,
+        ).start()
+
+    def _preparar_grupo_async(self, alerta):
+        processo = alerta['process']
+        status, mensagem, grupo = preparar_grupo_processo(
+            processo['pid'], processo['create_time'], processo['name'],
+        )
+        try:
+            self.root.after(
+                0, self._confirmar_grupo_preparado,
+                alerta, status, mensagem, grupo,
+            )
+        except (tk.TclError, RuntimeError):
+            debug_log.registrar(
+                'process_action', 'grupo_preparado_sem_interface', nivel='WARNING',
+                alert_id=alerta['alert_id'], status=status, result=mensagem,
+            )
+
+    def _confirmar_grupo_preparado(
+        self, alerta, status, mensagem, grupo, aviso=''
+    ):
+        if alerta.get('action_status') != 'PREPARANDO':
+            return
+        if not self._sugestao_ainda_valida(alerta):
+            self._finalizar_sugestao(
+                alerta, 'NAO_MAIS_ALTO',
+                'O sistema normalizou enquanto o grupo era verificado.',
+            )
+            return
+        if status != 'OK':
+            self._finalizar_sugestao(alerta, status, mensagem)
+            return
+
+        processo = alerta['process']
+        membros = grupo['processes']
+        lista_membros = ', '.join(
+            f"{membro['name']} (PID {membro['pid']})"
+            for membro in membros
+        )
+        prefixo_aviso = f'{aviso}\n\n' if aviso else ''
+        confirmar = messagebox.askyesno(
+            'Confirmar encerramento',
+            f"{prefixo_aviso}Deseja encerrar todas as instâncias de {processo['name']} e seus "
+            f"processos filhos? Foram encontrados {len(membros)} processo(s).\n\n"
+            f"Executável: {grupo['exe_path']}\n"
+            f"Grupo: {lista_membros}\n\n"
+            f"Uso observado: CPU {processo['cpu_percent']:.1f}% · "
+            f"RAM {processo['ram_percent']:.1f}%.\n\n"
+            'Todas as instâncias deste executável serão fechadas. O encerramento '
+            'forçado pode causar perda de dados não salvos.',
+            icon='warning',
+            parent=self.root,
+        )
+        if not confirmar:
+            debug_log.registrar(
+                'process_action', 'encerramento_cancelado',
+                alert_id=alerta['alert_id'], pid=processo['pid'],
+                process_name=processo['name'], reason='usuario_cancelou_confirmacao',
+            )
+            self._finalizar_sugestao(
+                alerta, 'IGNORADO', 'Encerramento cancelado pelo usuário.',
+            )
+            return
+
+        alerta['action_status'] = 'ENCERRANDO'
+        alerta['_grupo_processos'] = [
+            {chave: membro[chave] for chave in ('pid', 'name', 'create_time')}
+            for membro in membros
+        ]
+        self._renderizar_notificacoes()
+        self._renderizar_acoes_pendentes()
+        threading.Thread(
+            target=self._encerrar_processo_async,
+            args=(alerta, grupo),
+            daemon=True,
+        ).start()
+
+    def _sistema_acima_dos_limites(self):
+        amostra = self.coletor.ultima()
+        return bool(
+            amostra is not None
+            and (
+                amostra.cpu >= self.limites['cpu_global']
+                or amostra.ram >= self.limites['ram_global']
+            )
+        )
+
+    def _sugestao_ainda_valida(self, alerta):
+        return bool(
+            self.state_store is not None
+            and self.state_store.estado_atual(alerta['host_id']) == 'CRÍTICO'
+            and self._sistema_acima_dos_limites()
+        )
+
+    def _aguardar_nova_amostra(self, posterior_a):
+        limite = time.monotonic() + TEMPO_REAVALIACAO_PROCESSO
+        while time.monotonic() < limite and not getattr(self, '_app_fechando', False):
+            amostra = self.coletor.ultima()
+            if amostra is not None and getattr(amostra, 'inicio_monotonic', 0) > posterior_a:
+                return amostra
+            time.sleep(0.1)
+        return None
+
+    def _encerrar_processo_async(self, alerta, grupo=None):
+        processo = alerta['process']
+        if not self._sugestao_ainda_valida(alerta):
+            status, mensagem = (
+                'NAO_MAIS_ALTO',
+                'O sistema normalizou antes do encerramento; ação cancelada.',
+            )
+        else:
+            if grupo is None:
+                status, mensagem, grupo = preparar_grupo_processo(
+                    processo['pid'], processo['create_time'], processo['name'],
+                )
+                if status == 'OK':
+                    status, mensagem = terminar_grupo_processo(grupo)
+            else:
+                status, mensagem = terminar_grupo_processo(grupo)
+        if status == 'GRUPO_ALTERADO':
+            try:
+                self.root.after(
+                    0, self._reconfirmar_grupo_alterado,
+                    alerta, grupo, mensagem,
+                )
+            except (tk.TclError, RuntimeError):
+                debug_log.registrar(
+                    'process_action', 'grupo_alterado_sem_interface', nivel='WARNING',
+                    alert_id=alerta['alert_id'], result=mensagem,
+                )
+            return
+        if grupo is not None:
+            alerta['_grupo_processos'] = [
+                {chave: membro[chave] for chave in ('pid', 'name', 'create_time')}
+                for membro in grupo['processes']
+            ]
+        fim_encerramento = time.monotonic()
+        if status in {'ENCERRADO', 'JA_ENCERRADO'} and not getattr(
+            self, '_app_fechando', False,
+        ):
+            tentados = set(alerta.get('_processos_tentados', ()))
+            tentados.update(
+                (membro['pid'], membro['create_time'])
+                for membro in (grupo or {}).get('processes', ())
+            )
+            if grupo:
+                tentados.add(('exe', grupo['exe_path']))
+            if not grupo:
+                tentados.add((processo['pid'], processo['create_time']))
+            amostra = self._aguardar_nova_amostra(fim_encerramento)
+            if amostra is None:
+                mensagem += ' Não foi possível obter uma nova amostra para reavaliar.'
+            elif amostra.cpu < self.limites['cpu_global'] and amostra.ram < self.limites['ram_global']:
+                mensagem += ' CPU e RAM voltaram abaixo dos limites configurados.'
+            else:
+                proximo = _escolher_processo(amostra, self.limites, tentados)
+                if proximo is None:
+                    mensagem += (
+                        ' O sistema continua acima dos limites, mas não há outro '
+                        'processo seguro entre os candidatos atuais.'
+                    )
+                else:
+                    alerta_seguinte = {
+                        'alert_id': str(uuid.uuid4()),
+                        'alert_type': 'process_recommendation',
+                        'host_id': alerta['host_id'],
+                        'level': 'CRITICAL',
+                        'source': 'reavaliacao_pos_encerramento',
+                        'message': (
+                            f"Consumo ainda acima dos limites: CPU {amostra.cpu:.1f}% "
+                            f"(limite {self.limites['cpu_global']:g}%), RAM "
+                            f"{amostra.ram:.1f}% (limite "
+                            f"{self.limites['ram_global']:g}%). Próxima sugestão: "
+                            f"{proximo['name']} (PID {proximo['pid']})."
+                        ),
+                        'received_at': datetime.now().astimezone().isoformat(),
+                        'process': proximo,
+                        '_processos_tentados': tentados,
+                    }
+                    self._receber_alerta(alerta_seguinte)
+                    mensagem += (
+                        f" O sistema continua acima dos limites; uma nova sugestão "
+                        f"para {proximo['name']} (PID {proximo['pid']}) foi enviada."
+                    )
+        try:
+            self.root.after(
+                0, self._finalizar_sugestao, alerta, status, mensagem,
+            )
+        except (tk.TclError, RuntimeError):
+            debug_log.registrar(
+                'process_action', 'resultado_sem_interface', nivel='WARNING',
+                alert_id=alerta['alert_id'], status=status, result=mensagem,
+            )
+
+    def _reconfirmar_grupo_alterado(self, alerta, grupo, mensagem):
+        if (
+            getattr(self, '_app_fechando', False)
+            or alerta.get('action_status') != 'ENCERRANDO'
+        ):
+            return
+        alerta['action_status'] = 'PREPARANDO'
+        alerta['_grupo_processos'] = [
+            {chave: membro[chave] for chave in ('pid', 'name', 'create_time')}
+            for membro in grupo['processes']
+        ]
+        self._renderizar_notificacoes()
+        self._renderizar_acoes_pendentes()
+        self._confirmar_grupo_preparado(
+            alerta, 'OK', '', grupo, aviso=mensagem,
+        )
+
+    def _finalizar_sugestao(self, alerta, status, mensagem):
+        alerta['action_status'] = status
+        alerta['lida'] = True
+        processo = alerta['process']
+        debug_log.registrar(
+            'process_action', 'decisao_registrada', alert_id=alerta['alert_id'],
+            host_id=alerta['host_id'], pid=processo['pid'],
+            process_name=processo['name'], create_time=processo['create_time'],
+            group_processes=alerta.get('_grupo_processos'),
+            status=status, result=mensagem,
+        )
+        self._registrar_historico(
+            'Decisões',
+            f"{processo['name']} (PID {processo['pid']}): {status}. {mensagem}",
+            nivel=(
+                'INFO'
+                if status in {'IGNORADO', 'ENCERRADO', 'JA_ENCERRADO', 'NAO_MAIS_ALTO'}
+                else 'WARNING'
+            ),
+            origem='usuário',
+            host_id=alerta['host_id'],
+        )
+        self.sino_notificacoes.set_quantidade(
+            sum(not item['lida'] for item in self.notificacoes)
+        )
+        self._renderizar_notificacoes()
+        self._renderizar_acoes_pendentes()
+        if self._popup_alerta_id == alerta['alert_id'] and self._popup_alerta is not None:
+            self._fechar_toast(self._popup_alerta, 'acao_resolvida')
 
     def _abrir_notificacoes(self):
         for alerta in self.notificacoes:
@@ -919,6 +1512,10 @@ class App:
         busca.pack(side='left', fill='x', expand=True)
         busca.insert(0, '')
         busca.bind('<KeyRelease>', self._filtrar_historico)
+
+        self._historico_acoes = tk.Frame(janela, bg=theme.BG)
+        self._historico_acoes.pack(fill='x', padx=18, pady=(0, 8))
+        self._renderizar_acoes_pendentes()
 
         conteudo = tk.Frame(janela, bg=theme.SURFACE)
         conteudo.pack(fill='both', expand=True, padx=18, pady=(0, 10))
@@ -975,6 +1572,7 @@ class App:
                 self._historico_status = None
                 self._historico_btn_novos = None
                 self._historico_btn_antigos = None
+                self._historico_acoes = None
 
         janela.bind('<Destroy>', ao_destruir)
 
@@ -985,6 +1583,76 @@ class App:
     def _mudar_pagina_historico(self, deslocamento):
         self._historico_offset = max(0, self._historico_offset + deslocamento)
         self._renderizar_notificacoes()
+
+    def _renderizar_acoes_pendentes(self):
+        painel = self._historico_acoes
+        if painel is None:
+            return
+        try:
+            if not painel.winfo_exists():
+                return
+            for widget in painel.winfo_children():
+                widget.destroy()
+            pendentes = [
+                alerta for alerta in self.notificacoes
+                if alerta.get('process')
+                and alerta.get('action_status') in {
+                    'PENDENTE', 'PREPARANDO', 'ENCERRANDO',
+                }
+            ]
+            if not pendentes:
+                return
+            tk.Label(
+                painel, text='Sugestões de processo (relacionadas ao alerta global)',
+                font=('Segoe UI Semibold', 9), fg=theme.FG, bg=theme.BG,
+            ).pack(anchor='w', pady=(0, 5))
+            for alerta in pendentes:
+                processo = alerta['process']
+                cartao = tk.Frame(painel, bg=theme.SURFACE, padx=9, pady=7)
+                cartao.pack(fill='x', pady=(0, 5))
+                tk.Label(
+                    cartao,
+                    text=(
+                        f"{processo['name']} (PID {processo['pid']}) · "
+                        f"CPU {processo['cpu_percent']:.1f}% · "
+                        f"RAM {processo['ram_percent']:.1f}%"
+                    ),
+                    font=('Segoe UI', 8), fg=theme.FG, bg=theme.SURFACE,
+                    anchor='w',
+                ).pack(side='left', fill='x', expand=True)
+                if alerta['action_status'] in {'PREPARANDO', 'ENCERRANDO'}:
+                    tk.Label(
+                        cartao,
+                        text=(
+                            'Verificando grupo…'
+                            if alerta['action_status'] == 'PREPARANDO'
+                            else 'Encerrando grupo…'
+                        ),
+                        font=('Segoe UI', 8),
+                        fg=theme.WARN, bg=theme.SURFACE,
+                    ).pack(side='right')
+                else:
+                    tk.Button(
+                        cartao, text='Encerrar',
+                        command=lambda a=alerta: self._resolver_sugestao(
+                            a['alert_id'], 'ENCERRAR',
+                        ),
+                        bg=theme.ERR, fg='#ffffff', activebackground=theme.ERR,
+                        activeforeground='#ffffff', relief='flat', borderwidth=0,
+                        padx=8, pady=3, cursor='hand2',
+                    ).pack(side='right', padx=(6, 0))
+                    tk.Button(
+                        cartao, text='Ignorar',
+                        command=lambda a=alerta: self._resolver_sugestao(
+                            a['alert_id'], 'IGNORAR',
+                        ),
+                        bg=theme.SURFACE_2, fg=theme.FG,
+                        activebackground=theme.SURFACE_2,
+                        activeforeground=theme.FG, relief='flat', borderwidth=0,
+                        padx=8, pady=3, cursor='hand2',
+                    ).pack(side='right')
+        except tk.TclError:
+            return
 
     def _renderizar_notificacoes(self):
         texto = self._texto_notificacoes
@@ -1065,7 +1733,7 @@ class App:
         self._app_fechando = True
         if self._iniciando and self._thread_preparacao is not None:
             self._thread_preparacao.join(timeout=55.0)
-        self._parar()
+        self._parar('fechamento_da_janela')
         self.historico_sessao.fechar()
         self.root.destroy()
 
