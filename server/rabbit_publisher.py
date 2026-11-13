@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 
@@ -10,6 +11,7 @@ from messaging.config import (
     ROUTING_KEY,
     declarar_topologia,
 )
+from messaging import debug_log
 from server.outbox import OutboxSQLite
 
 
@@ -43,6 +45,10 @@ class PublicadorRabbitMQ:
         self.outbox.adicionar(
             evento['event_id'], ROUTING_KEY, payload
         )
+        debug_log.registrar(
+            'rabbitmq', 'outbox_enfileirado',
+            event_id=evento['event_id'], event_type=evento.get('event_type'),
+        )
         self.iniciar()
         self._acordar.set()
 
@@ -57,10 +63,21 @@ class PublicadorRabbitMQ:
         thread.join(timeout=max(0.0, timeout) + 0.5)
         pendentes = self.outbox.quantidade_pendente()
         if pendentes:
-            self._log(
-                f'[RabbitMQ] {pendentes} evento(s) permanecem no outbox '
-                'para envio na próxima execução.'
+            debug_log.registrar(
+                'rabbitmq', 'encerramento_com_pendencias', nivel='WARNING',
+                pending_count=pendentes,
             )
+            if os.getenv('SENTINEL_SESSION_ID'):
+                mensagem = (
+                    f'[RabbitMQ] {pendentes} evento(s) da sessão atual '
+                    'permanecem no outbox; não serão reenviados fora da sessão.'
+                )
+            else:
+                mensagem = (
+                    f'[RabbitMQ] {pendentes} evento(s) permanecem no outbox '
+                    'para envio na próxima execução.'
+                )
+            self._log(mensagem)
 
     def _log(self, mensagem):
         if self.ao_log:
@@ -79,6 +96,7 @@ class PublicadorRabbitMQ:
             canal = conexao.channel()
             declarar_topologia(canal)
             canal.confirm_delivery()
+            debug_log.registrar('rabbitmq', 'conexao_estabelecida')
             return conexao, canal
         except Exception:
             conexao.close()
@@ -96,6 +114,9 @@ class PublicadorRabbitMQ:
     def _registrar_erro(self, erro):
         mensagem = str(erro)
         if mensagem != self._ultimo_erro:
+            debug_log.registrar(
+                'rabbitmq', 'conexao_indisponivel', nivel='WARNING', erro=mensagem,
+            )
             self._log(
                 f'[RabbitMQ] Broker indisponível; eventos ficam no outbox: '
                 f'{mensagem}'
@@ -152,6 +173,10 @@ class PublicadorRabbitMQ:
                         raise RuntimeError('RabbitMQ não confirmou a publicação')
 
                     self.outbox.marcar_enviado(item['id'])
+                    debug_log.registrar(
+                        'rabbitmq', 'evento_confirmado',
+                        event_id=item['event_id'], attempts=item['attempts'],
+                    )
                     if self._ultimo_erro is not None:
                         self._log('[RabbitMQ] Conexão restabelecida; outbox drenando.')
                         self._ultimo_erro = None
@@ -161,7 +186,17 @@ class PublicadorRabbitMQ:
                     self._registrar_erro(erro)
                     try:
                         self.outbox.registrar_falha(item['id'], erro)
+                        debug_log.registrar(
+                            'rabbitmq', 'publicacao_retentativa', nivel='WARNING',
+                            event_id=item['event_id'], attempts=item['attempts'] + 1,
+                            erro_tipo=type(erro).__name__, erro=erro,
+                        )
                     except Exception as erro_db:
+                        debug_log.registrar(
+                            'rabbitmq', 'falha_ao_atualizar_outbox', nivel='ERROR',
+                            event_id=item['event_id'],
+                            erro_tipo=type(erro_db).__name__, erro=erro_db,
+                        )
                         self._registrar_erro(erro_db)
                     if conexao is not None:
                         try:
