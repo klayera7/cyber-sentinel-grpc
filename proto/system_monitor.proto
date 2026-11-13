@@ -13,12 +13,32 @@ message AlertRequest {
   string alert_id = 3;
   string host_id = 4;
   string source = 5;
+  ProcessRecommendation process = 6;
 }
 
 message AlertAck {
   bool accepted = 1;
   string alert_id = 2;
   string error = 3;
+}
+
+message ProcessTelemetry {
+  uint32 pid = 1;
+  string name = 2;
+  double create_time = 3;
+  float cpu_percent = 4;
+  float ram_percent = 5;
+  uint64 rss_bytes = 6;
+}
+
+message ProcessRecommendation {
+  string recommendation_id = 1;
+  uint32 pid = 2;
+  string process_name = 3;
+  double create_time = 4;
+  float cpu_percent = 5;
+  float ram_percent = 6;
+  uint64 rss_bytes = 7;
 }
 
 message TelemetryData {
@@ -28,6 +48,7 @@ message TelemetryData {
   optional float temp_celsius = 4;
   optional float gpu_percent = 5;
   optional float gpu_mem_percent = 6;
+  repeated ProcessTelemetry top_processes = 7;
 }
 
 message AnalysisResponse {
