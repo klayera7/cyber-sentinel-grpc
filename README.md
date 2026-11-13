@@ -66,21 +66,31 @@ python collector/client.py
 
 ## Rodar o consumidor de decisões separadamente
 
-O painel inicia e encerra o consumidor junto com a coleta. Para executá-lo em
-modo independente, com RabbitMQ instalado e ativo:
+O painel inicia e encerra o consumidor junto com a coleta. No Windows, o
+consumidor standalone encerra quando o processo pai do terminal termina. Para
+executá-lo em modo independente, com RabbitMQ instalado e ativo:
 
 ```bash
 pip install -r requirements-consumer.txt
 python consumer/main.py
 ```
 
-O servidor publica uma mensagem por amostra processada. O consumidor persiste
-transições de estado em SQLite e as registra; não executa ações automáticas no
-sistema. Ao detectar uma transição, chama `SendAlert`; o painel mostra um popup
+Cada amostra coletada publica um evento rápido para a máquina de estados, sem
+esperar a análise do Ollama; os eventos de análise não alteram o estado. O
+consumidor persiste transições em SQLite e as registra; não executa ações
+automáticas no sistema. Ao detectar uma transição, chama `SendAlert`; o painel mostra um popup
 e mantém a notificação no sino até ser aberta. Não execute o comando separado ao
 mesmo tempo que o painel, pois a fila aceita um consumidor de estados ativo.
 O menu do sino também mostra diagnósticos, decisões e logs recebidos enquanto
 estava fechado; o histórico só existe durante a sessão atual do app.
+
+Os limites globais de CPU e RAM (padrão 85% para ambos) geram alerta após 2
+coletas consecutivas. Ao entrar em estado crítico por CPU/RAM, o painel também
+mostra o processo de maior contribuição como possível pista, sem limite
+individual por processo. O popup dura 10 segundos e as ações pendentes ficam no
+histórico da sessão. Encerrar exige confirmação e revalidação do processo e do
+estado global; se o sistema normalizar, a ação é cancelada. Não há encerramento
+automático.
 
 ## Configuração (env)
 
@@ -94,6 +104,9 @@ estava fechado; o histórico só existe durante a sessão atual do app.
 | `SENTINEL_STATE_DB` | `%LOCALAPPDATA%/CyberSentinel/state_machine.sqlite3` | Banco da máquina de estados |
 | `SENTINEL_HOST_ID` | hostname local | Identificador estável opcional da máquina |
 | `SENTINEL_OUTBOX_DB` | `%LOCALAPPDATA%/CyberSentinel/rabbit_outbox.sqlite3` | Banco de eventos pendentes |
+| `SENTINEL_CPU_LIMIT` | `85` | Limite global de CPU (%) |
+| `SENTINEL_RAM_LIMIT` | `85` | Limite global de RAM (%) |
+| `SENTINEL_SETTINGS` | `%LOCALAPPDATA%/CyberSentinel/settings.json` | Preferências salvas dos limites |
 
 ## Interface gráfica (desktop)
 
@@ -119,6 +132,7 @@ python build_exe.py      # gera dist/cyber-sentinel.exe
 - `collector/` — cliente que envia CPU/RAM via streaming
 - `app/` — interface gráfica (Tkinter) com servidor + coletor embutidos
   - `sensores.py` — leitura de GPU/VRAM/temperatura da GPU via `nvidia-smi`
+  - `processos.py` — top processos e encerramento com validação
   - `rabbitmq_service.py` — inicialização/verificação do serviço RabbitMQ
   - `historico.py` — histórico filtrável em memória da sessão
 - `messaging/` — contrato/configuração RabbitMQ e schema dos eventos
