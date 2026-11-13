@@ -7,26 +7,54 @@ import os
 
 caminho_proto = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'proto'))
 sys.path.append(caminho_proto)
+caminho_raiz = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, caminho_raiz)
 
 import system_monitor_pb2 as pb2
 import system_monitor_pb2_grpc as pb2_grpc
+from app.processos import coletar_processos
+from messaging import debug_log
 
 def generate_telemetry():
     while True:
         cpu = psutil.cpu_percent(interval=1)
         ram = psutil.virtual_memory().percent
         agora = datetime.now().strftime("%H:%M:%S")
+        processos = coletar_processos()
+
+        debug_log.registrar(
+            'collector_standalone', 'amostra', timestamp=agora,
+            cpu_percent=cpu,
+            ram_percent=ram,
+            top_processes=[
+                {
+                    chave: valor for chave, valor in processo.items()
+                    if chave != 'exe_path'
+                }
+                for processo in processos
+            ],
+        )
 
         print(f"[Coletor] A enviar -> CPU: {cpu}% | RAM: {ram}%")
 
-        yield pb2.TelemetryData(cpu_percent=cpu, ram_percent=ram, timestamp=agora)
+        dados = pb2.TelemetryData(cpu_percent=cpu, ram_percent=ram, timestamp=agora)
+        for processo in processos:
+            dados.top_processes.add(
+                pid=processo['pid'],
+                name=processo['name'],
+                create_time=processo['create_time'],
+                cpu_percent=processo['cpu_percent'],
+                ram_percent=processo['ram_percent'],
+                rss_bytes=processo['rss_bytes'],
+            )
+        yield dados
 
         time.sleep(3)
 
 def run():
     print("A iniciar o Coletor...")
 
-    with grpc.insecure_channel('localhost:50051') as channel:
+    with grpc.insecure_channel('127.0.0.1:50051') as channel:
 
         stub = pb2_grpc.SystemMonitorStub(channel)
 
