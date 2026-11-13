@@ -4,18 +4,20 @@ class MaquinaEstados:
     CRITICO = 'CRÍTICO'
 
     _NIVEIS = {NORMAL: 0, ATENCAO: 1, CRITICO: 2}
-    AMOSTRAS_ESCALADA = 3
+    AMOSTRAS_ESCALADA = 2
     AMOSTRAS_RECUPERACAO = 5
 
     @classmethod
-    def classificar(cls, metricas):
+    def classificar(cls, metricas, cpu_limit=None, ram_limit=None):
+        cpu_limit = 85.0 if cpu_limit is None else float(cpu_limit)
+        ram_limit = 85.0 if ram_limit is None else float(ram_limit)
         gpu = metricas.get('gpu_percent')
         vram = metricas.get('gpu_mem_percent')
         temperatura = metricas.get('gpu_temp_celsius')
 
         critico = (
-            metricas['cpu_percent'] >= 90
-            or metricas['ram_percent'] >= 90
+            metricas['cpu_percent'] >= cpu_limit
+            or metricas['ram_percent'] >= ram_limit
             or (gpu is not None and gpu >= 90)
             or (vram is not None and vram >= 90)
             or (temperatura is not None and temperatura >= 90)
@@ -24,9 +26,7 @@ class MaquinaEstados:
             return cls.CRITICO
 
         atencao = (
-            metricas['cpu_percent'] >= 70
-            or metricas['ram_percent'] >= 80
-            or (gpu is not None and gpu >= 70)
+            (gpu is not None and gpu >= 70)
             or (vram is not None and vram >= 80)
             or (temperatura is not None and temperatura >= 75)
         )
