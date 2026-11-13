@@ -24,21 +24,25 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14system_monitor.proto\x12\x07monitor\"e\n\x0c\x41lertRequest\x12\x13\n\x0blog_message\x18\x01 \x01(\t\x12\r\n\x05level\x18\x02 \x01(\t\x12\x10\n\x08\x61lert_id\x18\x03 \x01(\t\x12\x0f\n\x07host_id\x18\x04 \x01(\t\x12\x0e\n\x06source\x18\x05 \x01(\t\"=\n\x08\x41lertAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x10\n\x08\x61lert_id\x18\x02 \x01(\t\x12\r\n\x05\x65rror\x18\x03 \x01(\t\"\xd4\x01\n\rTelemetryData\x12\x13\n\x0b\x63pu_percent\x18\x01 \x01(\x02\x12\x13\n\x0bram_percent\x18\x02 \x01(\x02\x12\x11\n\ttimestamp\x18\x03 \x01(\t\x12\x19\n\x0ctemp_celsius\x18\x04 \x01(\x02H\x00\x88\x01\x01\x12\x18\n\x0bgpu_percent\x18\x05 \x01(\x02H\x01\x88\x01\x01\x12\x1c\n\x0fgpu_mem_percent\x18\x06 \x01(\x02H\x02\x88\x01\x01\x42\x0f\n\r_temp_celsiusB\x0e\n\x0c_gpu_percentB\x12\n\x10_gpu_mem_percent\"%\n\x10\x41nalysisResponse\x12\x11\n\tdiagnosis\x18\x01 \x01(\t2\x90\x01\n\rSystemMonitor\x12\x35\n\tSendAlert\x12\x15.monitor.AlertRequest\x1a\x11.monitor.AlertAck\x12H\n\x0fStreamTelemetry\x12\x16.monitor.TelemetryData\x1a\x19.monitor.AnalysisResponse(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14system_monitor.proto\x12\x07monitor\"\x96\x01\n\x0c\x41lertRequest\x12\x13\n\x0blog_message\x18\x01 \x01(\t\x12\r\n\x05level\x18\x02 \x01(\t\x12\x10\n\x08\x61lert_id\x18\x03 \x01(\t\x12\x0f\n\x07host_id\x18\x04 \x01(\t\x12\x0e\n\x06source\x18\x05 \x01(\t\x12/\n\x07process\x18\x06 \x01(\x0b\x32\x1e.monitor.ProcessRecommendation\"=\n\x08\x41lertAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x10\n\x08\x61lert_id\x18\x02 \x01(\t\x12\r\n\x05\x65rror\x18\x03 \x01(\t\"\x7f\n\x10ProcessTelemetry\x12\x0b\n\x03pid\x18\x01 \x01(\r\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x13\n\x0b\x63reate_time\x18\x03 \x01(\x01\x12\x13\n\x0b\x63pu_percent\x18\x04 \x01(\x02\x12\x13\n\x0bram_percent\x18\x05 \x01(\x02\x12\x11\n\trss_bytes\x18\x06 \x01(\x04\"\xa7\x01\n\x15ProcessRecommendation\x12\x19\n\x11recommendation_id\x18\x01 \x01(\t\x12\x0b\n\x03pid\x18\x02 \x01(\r\x12\x14\n\x0cprocess_name\x18\x03 \x01(\t\x12\x13\n\x0b\x63reate_time\x18\x04 \x01(\x01\x12\x13\n\x0b\x63pu_percent\x18\x05 \x01(\x02\x12\x13\n\x0bram_percent\x18\x06 \x01(\x02\x12\x11\n\trss_bytes\x18\x07 \x01(\x04\"\x86\x02\n\rTelemetryData\x12\x13\n\x0b\x63pu_percent\x18\x01 \x01(\x02\x12\x13\n\x0bram_percent\x18\x02 \x01(\x02\x12\x11\n\ttimestamp\x18\x03 \x01(\t\x12\x19\n\x0ctemp_celsius\x18\x04 \x01(\x02H\x00\x88\x01\x01\x12\x18\n\x0bgpu_percent\x18\x05 \x01(\x02H\x01\x88\x01\x01\x12\x1c\n\x0fgpu_mem_percent\x18\x06 \x01(\x02H\x02\x88\x01\x01\x12\x30\n\rtop_processes\x18\x07 \x03(\x0b\x32\x19.monitor.ProcessTelemetryB\x0f\n\r_temp_celsiusB\x0e\n\x0c_gpu_percentB\x12\n\x10_gpu_mem_percent\"%\n\x10\x41nalysisResponse\x12\x11\n\tdiagnosis\x18\x01 \x01(\t2\x90\x01\n\rSystemMonitor\x12\x35\n\tSendAlert\x12\x15.monitor.AlertRequest\x1a\x11.monitor.AlertAck\x12H\n\x0fStreamTelemetry\x12\x16.monitor.TelemetryData\x1a\x19.monitor.AnalysisResponse(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'system_monitor_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_ALERTREQUEST']._serialized_start=33
-  _globals['_ALERTREQUEST']._serialized_end=134
-  _globals['_ALERTACK']._serialized_start=136
-  _globals['_ALERTACK']._serialized_end=197
-  _globals['_TELEMETRYDATA']._serialized_start=200
-  _globals['_TELEMETRYDATA']._serialized_end=412
-  _globals['_ANALYSISRESPONSE']._serialized_start=414
-  _globals['_ANALYSISRESPONSE']._serialized_end=451
-  _globals['_SYSTEMMONITOR']._serialized_start=454
-  _globals['_SYSTEMMONITOR']._serialized_end=598
+  _globals['_ALERTREQUEST']._serialized_start=34
+  _globals['_ALERTREQUEST']._serialized_end=184
+  _globals['_ALERTACK']._serialized_start=186
+  _globals['_ALERTACK']._serialized_end=247
+  _globals['_PROCESSTELEMETRY']._serialized_start=249
+  _globals['_PROCESSTELEMETRY']._serialized_end=376
+  _globals['_PROCESSRECOMMENDATION']._serialized_start=379
+  _globals['_PROCESSRECOMMENDATION']._serialized_end=546
+  _globals['_TELEMETRYDATA']._serialized_start=549
+  _globals['_TELEMETRYDATA']._serialized_end=811
+  _globals['_ANALYSISRESPONSE']._serialized_start=813
+  _globals['_ANALYSISRESPONSE']._serialized_end=850
+  _globals['_SYSTEMMONITOR']._serialized_start=853
+  _globals['_SYSTEMMONITOR']._serialized_end=997
 # @@protoc_insertion_point(module_scope)
